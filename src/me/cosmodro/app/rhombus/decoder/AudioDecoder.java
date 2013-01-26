@@ -8,7 +8,11 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
 
 import android.media.AudioFormat;
 import android.media.AudioRecord;
@@ -25,19 +29,20 @@ public class AudioDecoder {
 	public static int TRACK_2_BITLENGTH = 5;
 	public static int TRACK_2_BASECHAR = 48;
 	
-	private boolean debugging = false;
+	private boolean debugging = true;
 
 	private Handler mHandler;
 	
 	private byte[] audioBytes;
 	
-	private int frequency = 22050; //44100;
+	private int frequency = 44100;
 	private int channelConfiguration = AudioFormat.CHANNEL_IN_MONO;
 	private int audioEncoding = AudioFormat.ENCODING_PCM_16BIT;
 	private int bufferSize;
 	private AudioRecord audioRecord;
 	private int silenceLevel = 500; //arbitrary level below which we consider "silent"
 	private int minLevel = silenceLevel; //adaptive minimum level, should vary with each swipe.
+	private double smoothing = 0.1;
 	private double minLevelCoeff = 0.5;
 	
 	private boolean recording = false;
@@ -56,9 +61,19 @@ public class AudioDecoder {
 		if (recording){
 			throw new IllegalStateException("Cannot set frequency while recording");
 		}else{
+			int oldfreq = frequency;
 			frequency = f;
 			debug(TAG, "setting frequency to: "+f);
 			bufferSize = AudioRecord.getMinBufferSize(frequency, channelConfiguration, audioEncoding)*2;
+			if (bufferSize < 0){
+				debug(TAG, "could not set sample rate as requested.  Error code is:"+bufferSize);
+				frequency = oldfreq;
+				bufferSize = AudioRecord.getMinBufferSize(frequency, channelConfiguration, audioEncoding)*2;
+				
+		        Message msg = Message.obtain();
+		        msg.what = MessageType.INVALID_SAMPLE_RATE.ordinal();
+		        mHandler.sendMessage(msg);
+			}
 		}
 	}
 	
@@ -111,6 +126,14 @@ public class AudioDecoder {
 		this.minLevelCoeff = minLevelCoeff;
 	}
 
+	public double getSmoothing() {
+		return smoothing;
+	}
+
+	public void setSmoothing(double smoothing) {
+		this.smoothing = smoothing;
+	}
+
 	/**
 	 * get whether currently recording
 	 * @return
@@ -125,9 +148,8 @@ public class AudioDecoder {
     	audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC,
     			frequency, channelConfiguration,
     			audioEncoding, bufferSize);
-    	audioRecord.startRecording();
+		audioRecord.startRecording();
     	recording = true;
-
 	}
 
 	public void stopRecording(){
@@ -181,7 +203,7 @@ public class AudioDecoder {
 	private void recordData(short[] initialBuffer, int initialBufferSize){
 		debug(TAG, "recording data");
         Message msg = Message.obtain();
-    	// Create a DataOuputStream to write the audio data 
+    	// Create a DataOutputStream to write the audio data 
     	ByteArrayOutputStream os = new ByteArrayOutputStream();
     	BufferedOutputStream bos = new BufferedOutputStream(os);
     	DataOutputStream dos = new DataOutputStream(bos);
@@ -235,7 +257,8 @@ public class AudioDecoder {
     			mHandler.sendMessage(msg);
     			return;
 	    	}
-	    	audioBytes = os.toByteArray(); 
+	    	audioBytes = os.toByteArray();
+	    	
 	    	processData(audioBytes);
 	    	
     	}catch(Exception e){
@@ -248,43 +271,136 @@ public class AudioDecoder {
     	}
 		
 	}
+	
+	private List<Short> getShorts(byte[] bytes) throws IOException{
+		ArrayList<Short> result = new ArrayList<Short>(bytes.length/2);
+    	InputStream is = new ByteArrayInputStream(bytes);
+    	BufferedInputStream bis = new BufferedInputStream(is);
+    	DataInputStream dis = new DataInputStream(bis);
+		while (dis.available() > 0) {
+			result.add(dis.readShort());
+		}
+		return result;
+	}
+	
+	private List<Short> preprocessData(List<Short> data){
+		data = recenter(data);
+		data = rescale(data);
+		data = smooth(data);
+		return data;
+	}
 
 	private void processData(byte[] bytes) throws IOException{
 		debug(TAG, "processing data");
-        Message msg = Message.obtain();
+    	List<Short> data = preprocessData(getShorts(bytes));
+		
 		//first pass, iterate through bytes, get avg peak level
 		//set minLevel to min% of avg peak
         SwipeData result = new SwipeData();
         result.setContent("Unevaluated.  This shouldn't happen");
         result.setBadRead();
-		minLevel = getMinLevel(bytes, minLevelCoeff);
-		//second pass, decode to bitset
-		BitSet bits = decodeToBitSet(bytes);
+       
+		minLevel = getMinLevel(data, minLevelCoeff);
+
+		Log.d(TAG, "first, the peaks method");
+		BitSet bits = decodePeaksToBitSet(getPeaks(data, minLevel));
+
 		result = decodeToASCII(bits);
+        
 		if (result.isBadRead()){
 			debug(TAG, "bad read, lets try it backwards");
 			result = decodeToASCII(reverse(bits));
 		}
-		msg = Message.obtain();
-		msg.what = MessageType.DECODED_TRACK.ordinal();
-		result.raw = bytes;
-		msg.obj = result;
-		mHandler.sendMessage(msg);
 
+		if (result.isBadRead()){
+			//second pass, decode to bitset
+			Log.d(TAG, "and now the zerocrossing method");
+			bits = decodeToBitSet(data);
+			result = decodeToASCII(bits);
+		}
+		if (result.isBadRead()){
+			debug(TAG, "bad read, lets try it backwards");
+			result = decodeToASCII(reverse(bits));
+		}
+		
+		result.raw = bytes;
+		reportResult(result);
+		
 	}
 	
-	private int getMinLevel(byte[]bytes, double coeff) throws IOException{
+	private void reportResult(SwipeData result){
+        Message msg = Message.obtain();
+		msg.what = MessageType.DECODED_TRACK.ordinal();
+		msg.obj = result;
+		mHandler.sendMessage(msg);
+	}
+	
+	/**
+	 * given a list of shorts representing samples, get the average value, then subtract that from each short
+	 * @param List<Short> data
+	 * @return
+	 */
+	private List<Short> recenter(List<Short> data){
+		List<Short> shorts = new ArrayList<Short>(data.size());
+		int sum = 0;
+    	for (Short val : data){
+    		sum += val;
+		}
+		short avg = (short)Math.round(sum/data.size());
+		for (Short s : data){
+			shorts.add((short) (s - avg));
+		}
+		return shorts;
+	}
+	
+	/**
+	 * stretch data to exaggerate waveform shape.  Samples less than silence are set to 0.
+	 * @param data
+	 * @return
+	 */
+	private List<Short> rescale(List<Short> data){
+		List<Short> shorts = new ArrayList<Short>(data.size());
+		int max = 0;
+		int min = 0;
+		for (Short val : data){
+			max = Math.max(val, max);
+			min = Math.min(val, min);
+		}
+		double posratio = Short.MAX_VALUE/max;
+		double negratio = Short.MIN_VALUE/min;
+		double ratio = Math.min(posratio, negratio);
+		for (Short val: data){
+			if (Math.abs(val) > silenceLevel){
+				shorts.add((short) (ratio*val));
+			}else{
+				shorts.add((short) 0);
+			}
+		}
+		return shorts;
+	}
+	
+	/**
+	 * apply smoothing to the data by setting each datapoint to a weighted average of the previous point and its raw value
+	 * @param data
+	 * @return
+	 */
+	private List<Short> smooth(List<Short> data){
+		Log.d(TAG, "smoothing data.  smoothing param is "+smoothing);
+		List<Short> shorts = new ArrayList<Short>(data.size());
+		Short lastVal = data.get(0);
+		for (Short val : data){
+			shorts.add((short) ((lastVal*smoothing) + (val * (1-smoothing))));
+		}
+		return shorts;
+	}
+	
+	private int getMinLevel(List<Short> data, double coeff){
 		short lastval = 0;
-		short val = 0;
 		int peakcount = 0;
 		int peaksum = 0;
 		int peaktemp = 0; //value to store highest peak value between zero crossings
-    	InputStream is = new ByteArrayInputStream(audioBytes);
-    	BufferedInputStream bis = new BufferedInputStream(is);
-    	DataInputStream dis = new DataInputStream(bis);
     	boolean hitmin = false;
-		while (dis.available() > 0) {
-    		val = dis.readShort();
+    	for (Short val : data){
     		if (val > 0 && lastval <= 0){
     			//we're coming from negative to positive, reset peaktemp
     			peaktemp = 0;
@@ -303,8 +419,6 @@ public class AudioDecoder {
     		lastval = val;
 		}
 		
-		//The .3 in the following line is an arbitrary scaling factor.  
-		//I have come up with it experimentally, but it can be changed to make the decode more or less noise sensitive
 		if (peakcount > 0){
 			int level =(int)Math.floor((peaksum / peakcount) * coeff); 
 			debug(TAG, "returning "+level+" for minLevel");
@@ -315,26 +429,128 @@ public class AudioDecoder {
 		}
 	}
 		
+	/**
+	 * get all peaks above threshold
+	 * a peak is a positive maximum or a negative minimum
+	 * @param bytes
+	 * @return
+	 */
+	private List<Peak> getPeaks(List<Short> data, int threshold){
+		LinkedList<Peak> toreturn = new LinkedList<Peak>();
+    	//current sample index
+    	int i = -1;
+    	short lastDp = 0;
+    	short beforeThatDp = 0;
+    	for (Short dp : data){
+    		i++;
+    		if (Math.abs(dp) < threshold){
+    			//if it's not a great enough level, we don't care if it's a min/max or not.  move on.
+    			continue;
+    		}
+    		
+    		//yes, I know these could be one condition.  I think it's more readable like this.
+    		if ((dp > 0) && (dp < lastDp) && (lastDp >= beforeThatDp)){ //positive maximum
+    			toreturn.add(new Peak(i, lastDp));
+    		}else if ((dp < 0) && (dp > lastDp) && (lastDp <= beforeThatDp)){ //negative minimum
+    			toreturn.add(new Peak(i, lastDp));
+    		}
+    		//if not a qualifying peak, move on.
+			beforeThatDp = lastDp;
+			lastDp = dp;
+    		
+    	}
+		debug(TAG, "got "+toreturn.size()+" peaks");
+		return toreturn;
+	}
+	
+	/**
+	 * convert list of Peaks to BitSet of bits representing logical bits of stripe
+	 * This uses both peak sign and timing.
+	 * @param peaks
+	 * @return
+	 */
+	public BitSet decodePeaksToBitSet(List<Peak> peaks){
+		BitSet result = new BitSet(); //Todo: determine if setting initial capacity is worth it.
+		debug(TAG, "there are "+peaks.size()+" peaks to decode");
+		Iterator<Peak> piterator = peaks.iterator();
+		if (!piterator.hasNext()){
+			debug(TAG, "no peaks to decode");
+			return result;
+		}
+		Peak lastPeak = piterator.next();
+		debug(TAG, "initial peak:"+lastPeak);
+		Peak peak;
+		int oneinterval = -1; //interval between transitions for a 1 bit.  There are two transitions per 1 bit, 1 per 0.
+		//so if interval is around 15, then if the space between transitions is 17, 15, that's a 1.  but if that was 32, that'd be 0.
+		//the pattern starts with a self-clocking set of 0s.  We'll discard the first few, just because.
+		int introDiscard = 1;
+		int discardCount = 0;
+		boolean flip;
+    	int resultBitCount = 0;
+    	int peakCount = 1; //for first we already got
+		boolean needHalfOne = false; //if the last interval was the first half of a 1, the next better be the second half
+		//iterate through peaks
+		while(piterator.hasNext()){
+			peak = piterator.next();
+			flip = !peak.sameSign(lastPeak);
+			debug(TAG, "peak:"+peak+" flip:"+flip+" peakcount:"+peakCount++);
+			if (flip){
+				if (discardCount < introDiscard){
+					debug(TAG, "discard");
+					discardCount++;
+				}else{
+					int sinceLast = peak.index - lastPeak.index;
+					if (oneinterval == -1) {
+						debug(TAG, "set oneinterval");
+						oneinterval = sinceLast/2;
+					}else {
+						boolean oz = isOne(sinceLast, oneinterval);
+						debug(TAG, "diff: " + sinceLast+ " oneinterval: "+oneinterval+" idx:"+peak.index+" one?: " + oz);
+						if (oz) {
+							if (needHalfOne) {
+								oneinterval = (oneinterval + sinceLast)/2;
+								result.set(resultBitCount, true);
+								resultBitCount++;
+								needHalfOne = false; //don't need next to be
+							}else {
+								needHalfOne = true;
+							}
+						}else {
+							if (needHalfOne) {
+								debug(TAG, "got a 0 where expected a 1.  result so far: " + result);
+								break;
+								//throw new Error("parse exception, did not get second half of expected 1 value");
+							}else {
+								oneinterval = (oneinterval + (sinceLast / 2))/2;
+								//group+="0";
+								//debug(TAG, "0");
+								result.set(resultBitCount, false);
+								resultBitCount++;
+							}
+						}
+					}
+				}
+				lastPeak = peak;
+			}
+		}
+    	debug(TAG, "raw binary: "+dumpString(result));
+		return result;
+	}
 	
 	/* convert array of bytes representing sample levels to BitSet of bits representing 
 	 * logical bits of stripe
 	 * 
-	 * @param byte[] bytes array of samples (shorts)
-	 * @return BitSet BitSet representing logical signal
+	 * @param data List of samples (shorts)
+	 * @return BitSet representing logical signal
 	 */
-	public BitSet decodeToBitSet(byte[] bytes) throws IOException{
-		debug(TAG, "bytes length: "+bytes.length);
+	public BitSet decodeToBitSet(List<Short> data){
 		BitSet result = new BitSet(); //Todo: determine if setting initial capacity is worth it.
     	// Create a DataOuputStream to write the audio data 
-    	InputStream is = new ByteArrayInputStream(bytes);
-    	BufferedInputStream bis = new BufferedInputStream(is);
-    	DataInputStream dis = new DataInputStream(bis);
     	//current sample index
     	int i = 0;
     	int resultBitCount = 0;
 		int lastSign = -1;
 		int lasti = 0;
-    	short dp;
 		int first = 0;
 		int oneinterval = -1; //interval between transitions for a 1 bit.  There are two transitions per 1 bit, 1 per 0.
 		//so if interval is around 15, then if the space between transitions is 17, 15, that's a 1.  but if that was 32, that'd be 0.
@@ -343,9 +559,7 @@ public class AudioDecoder {
 		int discardCount = 0;
 		boolean needHalfOne = false; //if the last interval was the first half of a 1, the next better be the second half
 		int expectedParityBit = 1; //invert every 1 bit.  parity bit should make number of 1s in group odd.
-
-		while (dis.available() > 0) {
-    		dp = dis.readShort();
+		for (Short dp : data){
 			if ((dp * lastSign < 0) && (Math.abs(dp) > minLevel)) {
 				if (first == 0) {
 					first = i;
@@ -358,7 +572,7 @@ public class AudioDecoder {
 						oneinterval = sinceLast/2;
 					}else {
 						boolean oz = isOne(sinceLast, oneinterval);
-						//debug(TAG, "diff: " + sinceLast+ " oneinterval: "+oneinterval+"one?: " + oz);
+						debug(TAG, "diff: " + sinceLast+ " oneinterval: "+oneinterval+" idx:"+i+" one?: " + oz);
 						if (oz) {
 							oneinterval = sinceLast;
 							if (needHalfOne) {
@@ -391,7 +605,6 @@ public class AudioDecoder {
 			i++;
     		
     	}
-    	dis.close();
     	debug(TAG, "raw binary: "+dumpString(result));
 		return result;
 	}
