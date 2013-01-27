@@ -11,12 +11,12 @@ public class Peak {
 	public int index;
 	
 	//sample value
-	public short value;
+	public int value;
 	
 	public Peak(){
-		this(0,(short)0);
+		this(0,0);
 	}
-	public Peak(int index, short value){
+	public Peak(int index, int value){
 		this.index = index;
 		this.value = value;
 	}

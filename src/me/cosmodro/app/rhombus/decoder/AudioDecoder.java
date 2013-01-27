@@ -272,27 +272,32 @@ public class AudioDecoder {
 		
 	}
 	
-	private List<Short> getShorts(byte[] bytes) throws IOException{
-		ArrayList<Short> result = new ArrayList<Short>(bytes.length/2);
+	/**
+	 * extracts 16 bit samples from an array of bytes
+	 * @param bytes
+	 * @return List<Integer> of samples.
+	 * @throws IOException
+	 */
+	private List<Integer> getSamples(byte[] bytes) throws IOException{
+		ArrayList<Integer> result = new ArrayList<Integer>(bytes.length/2);
     	InputStream is = new ByteArrayInputStream(bytes);
     	BufferedInputStream bis = new BufferedInputStream(is);
     	DataInputStream dis = new DataInputStream(bis);
 		while (dis.available() > 0) {
-			result.add(dis.readShort());
+			result.add(Integer.valueOf(dis.readShort()));
 		}
 		return result;
 	}
 	
-	private List<Short> preprocessData(List<Short> data){
+	private List<Integer> preprocessData(List<Integer> data){
 		data = recenter(data);
-		data = rescale(data);
 		data = smooth(data);
 		return data;
 	}
 
 	private void processData(byte[] bytes) throws IOException{
 		debug(TAG, "processing data");
-    	List<Short> data = preprocessData(getShorts(bytes));
+    	List<Integer> data = preprocessData(getSamples(bytes));
 		
 		//first pass, iterate through bytes, get avg peak level
 		//set minLevel to min% of avg peak
@@ -302,6 +307,7 @@ public class AudioDecoder {
        
 		minLevel = getMinLevel(data, minLevelCoeff);
 
+		/**
 		Log.d(TAG, "first, the peaks method");
 		BitSet bits = decodePeaksToBitSet(getPeaks(data, minLevel));
 
@@ -322,7 +328,28 @@ public class AudioDecoder {
 			debug(TAG, "bad read, lets try it backwards");
 			result = decodeToASCII(reverse(bits));
 		}
-		
+		**/
+		Log.d(TAG, "first, the zero crossing method");
+		BitSet bits = decodeToBitSet(data);
+		result = decodeToASCII(bits);
+		if (result.isBadRead()){
+			debug(TAG, "bad read, lets try it backwards");
+			result = decodeToASCII(reverse(bits));
+		}
+
+
+		if (result.isBadRead()){
+			//second pass, decode to bitset
+			bits = decodePeaksToBitSet(getPeaks(data, minLevel));
+			Log.d(TAG, "and now the peaks method");
+			result = decodeToASCII(bits);
+		}
+        
+		if (result.isBadRead()){
+			debug(TAG, "bad read, lets try it backwards");
+			result = decodeToASCII(reverse(bits));
+		}
+
 		result.raw = bytes;
 		reportResult(result);
 		
@@ -336,47 +363,21 @@ public class AudioDecoder {
 	}
 	
 	/**
-	 * given a list of shorts representing samples, get the average value, then subtract that from each short
-	 * @param List<Short> data
+	 * given a list of samples, get the average value, then subtract that from each sample
+	 * @param List<Integer> data
 	 * @return
 	 */
-	private List<Short> recenter(List<Short> data){
-		List<Short> shorts = new ArrayList<Short>(data.size());
+	private List<Integer> recenter(List<Integer> data){
+		List<Integer> samples = new ArrayList<Integer>(data.size());
 		int sum = 0;
-    	for (Short val : data){
+    	for (Integer val : data){
     		sum += val;
 		}
-		short avg = (short)Math.round(sum/data.size());
-		for (Short s : data){
-			shorts.add((short) (s - avg));
+		int avg = Math.round(sum/data.size());
+		for (Integer s : data){
+			samples.add(s - avg);
 		}
-		return shorts;
-	}
-	
-	/**
-	 * stretch data to exaggerate waveform shape.  Samples less than silence are set to 0.
-	 * @param data
-	 * @return
-	 */
-	private List<Short> rescale(List<Short> data){
-		List<Short> shorts = new ArrayList<Short>(data.size());
-		int max = 0;
-		int min = 0;
-		for (Short val : data){
-			max = Math.max(val, max);
-			min = Math.min(val, min);
-		}
-		double posratio = Short.MAX_VALUE/max;
-		double negratio = Short.MIN_VALUE/min;
-		double ratio = Math.min(posratio, negratio);
-		for (Short val: data){
-			if (Math.abs(val) > silenceLevel){
-				shorts.add((short) (ratio*val));
-			}else{
-				shorts.add((short) 0);
-			}
-		}
-		return shorts;
+		return samples;
 	}
 	
 	/**
@@ -384,23 +385,23 @@ public class AudioDecoder {
 	 * @param data
 	 * @return
 	 */
-	private List<Short> smooth(List<Short> data){
+	private List<Integer> smooth(List<Integer> data){
 		Log.d(TAG, "smoothing data.  smoothing param is "+smoothing);
-		List<Short> shorts = new ArrayList<Short>(data.size());
-		Short lastVal = data.get(0);
-		for (Short val : data){
-			shorts.add((short) ((lastVal*smoothing) + (val * (1-smoothing))));
+		List<Integer> samples = new ArrayList<Integer>(data.size());
+		Integer lastVal = data.get(0);
+		for (Integer val : data){
+			samples.add((int) ((lastVal*smoothing) + (val * (1-smoothing))));
 		}
-		return shorts;
+		return samples;
 	}
 	
-	private int getMinLevel(List<Short> data, double coeff){
-		short lastval = 0;
+	private int getMinLevel(List<Integer> data, double coeff){
+		int lastval = 0;
 		int peakcount = 0;
 		int peaksum = 0;
 		int peaktemp = 0; //value to store highest peak value between zero crossings
     	boolean hitmin = false;
-    	for (Short val : data){
+    	for (Integer val : data){
     		if (val > 0 && lastval <= 0){
     			//we're coming from negative to positive, reset peaktemp
     			peaktemp = 0;
@@ -435,13 +436,13 @@ public class AudioDecoder {
 	 * @param bytes
 	 * @return
 	 */
-	private List<Peak> getPeaks(List<Short> data, int threshold){
+	private List<Peak> getPeaks(List<Integer> data, int threshold){
 		LinkedList<Peak> toreturn = new LinkedList<Peak>();
     	//current sample index
     	int i = -1;
-    	short lastDp = 0;
-    	short beforeThatDp = 0;
-    	for (Short dp : data){
+    	int lastDp = 0;
+    	int beforeThatDp = 0;
+    	for (Integer dp : data){
     		i++;
     		if (Math.abs(dp) < threshold){
     			//if it's not a great enough level, we don't care if it's a min/max or not.  move on.
@@ -505,7 +506,7 @@ public class AudioDecoder {
 						oneinterval = sinceLast/2;
 					}else {
 						boolean oz = isOne(sinceLast, oneinterval);
-						debug(TAG, "diff: " + sinceLast+ " oneinterval: "+oneinterval+" idx:"+peak.index+" one?: " + oz);
+						debug(TAG, "diff (peaks): " + sinceLast+ " oneinterval: "+oneinterval+" idx:"+peak.index+" one?: " + oz);
 						if (oz) {
 							if (needHalfOne) {
 								oneinterval = (oneinterval + sinceLast)/2;
@@ -540,10 +541,10 @@ public class AudioDecoder {
 	/* convert array of bytes representing sample levels to BitSet of bits representing 
 	 * logical bits of stripe
 	 * 
-	 * @param data List of samples (shorts)
+	 * @param data List of samples (ints)
 	 * @return BitSet representing logical signal
 	 */
-	public BitSet decodeToBitSet(List<Short> data){
+	public BitSet decodeToBitSet(List<Integer> data){
 		BitSet result = new BitSet(); //Todo: determine if setting initial capacity is worth it.
     	// Create a DataOuputStream to write the audio data 
     	//current sample index
@@ -559,7 +560,7 @@ public class AudioDecoder {
 		int discardCount = 0;
 		boolean needHalfOne = false; //if the last interval was the first half of a 1, the next better be the second half
 		int expectedParityBit = 1; //invert every 1 bit.  parity bit should make number of 1s in group odd.
-		for (Short dp : data){
+		for (Integer dp : data){
 			if ((dp * lastSign < 0) && (Math.abs(dp) > minLevel)) {
 				if (first == 0) {
 					first = i;
@@ -686,6 +687,7 @@ public class AudioDecoder {
 			sb.append(letter);
 			bit = bits.get(i);
 			if (bit != expectedParity){
+				debug(TAG, "addBadCharIndex "+charCount);
 				toreturn.addBadCharIndex(charCount);
 			}
 			i++;
@@ -720,7 +722,7 @@ public class AudioDecoder {
 		for (int i = 0; i < size; i++){
 			toreturn.set(i, bits.get((size-1)-i));
 		}
-		//debug(TAG, "reversed BitSet: "+dumpString(toreturn));
+		//debug(TAG, "reversed BitSet: "+dump(toreturn));
 		return toreturn;
 	}
 	
