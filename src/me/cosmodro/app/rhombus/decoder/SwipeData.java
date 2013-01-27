@@ -34,7 +34,7 @@ public class SwipeData {
 	public CharSequence toFormattedCharSequence(CharacterStyle cs){
 		SpannableStringBuilder ssb = new SpannableStringBuilder(content);
 		for (Integer i : badCharIndices){
-			ssb.setSpan(cs, i, i+1, 0);
+			ssb.setSpan(CharacterStyle.wrap(cs), i, i+1, 0);
 		}
 		return ssb;
 	}
