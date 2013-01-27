@@ -1,20 +1,14 @@
 package me.cosmodro.app.rhombus.decoder;
 
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 
-import android.util.Log;
+//commented out for independence from android.  But it's convenient, so I left it easy to enable.
+//don't forget to uncomment the body of debug.
+//import android.util.Log;
 
 public class AudioDecoder {
 	public static String TAG = "Rhombus AudioDecoder";
@@ -101,7 +95,7 @@ public class AudioDecoder {
        
 		minLevel = getMinLevel(data, minLevelCoeff);
 
-		Log.d(TAG, "first, the zero crossing method");
+		debug(TAG, "first, the zero crossing method");
 		BitSet bits = decodeToBitSet(data);
 		result = decodeToASCII(bits);
 		if (result.isBadRead()){
@@ -112,7 +106,7 @@ public class AudioDecoder {
 		if (result.isBadRead()){
 			//second pass, decode to bitset
 			bits = decodePeaksToBitSet(getPeaks(data, minLevel));
-			Log.d(TAG, "and now the peaks method");
+			debug(TAG, "and now the peaks method");
 			result = decodeToASCII(bits);
 		}
         
@@ -150,7 +144,7 @@ public class AudioDecoder {
 	 * @return
 	 */
 	private List<Integer> smooth(List<Integer> data){
-		Log.d(TAG, "smoothing data.  smoothing param is "+smoothing);
+		debug(TAG, "smoothing data.  smoothing param is "+smoothing);
 		List<Integer> samples = new ArrayList<Integer>(data.size());
 		Integer lastVal = data.get(0);
 		for (Integer val : data){
@@ -504,7 +498,7 @@ public class AudioDecoder {
 	
 	private void debug(String tag, String message){
 		if (debugging){
-			Log.d(tag, message);
+			//Log.d(tag, message);
 		}
 	}
 
