@@ -3,40 +3,17 @@ package me.cosmodro.app.rhombus.decoder;
 import java.util.ArrayList;
 import java.util.List;
 
-import android.graphics.Color;
-import android.text.SpannableStringBuilder;
-import android.text.style.CharacterStyle;
-import android.text.style.ForegroundColorSpan;
-
 public class SwipeData {
 	public String content;
 	public List<Integer> badCharIndices;
 	public boolean badRead;
-	public byte[] raw;
-	private static CharacterStyle defaultBadCharFormat = new ForegroundColorSpan(Color.RED);
+	public List<Integer> raw;
 	
 	public SwipeData(){
 		content = "";
 		badRead = false;
 		badCharIndices = new ArrayList<Integer>();
-		raw = new byte[0]; //placeholder.
-	}
-	
-	/**
-	 * create a CharSequence including formatting which makes characters at badCharIndices highlighted
-	 * This version uses the defaultFormat
-	 * @return
-	 */
-	public CharSequence toFormattedCharSequence(){
-		return toFormattedCharSequence(defaultBadCharFormat);
-	}
-	
-	public CharSequence toFormattedCharSequence(CharacterStyle cs){
-		SpannableStringBuilder ssb = new SpannableStringBuilder(content);
-		for (Integer i : badCharIndices){
-			ssb.setSpan(CharacterStyle.wrap(cs), i, i+1, 0);
-		}
-		return ssb;
+		raw = new ArrayList<Integer>(); //placeholder.
 	}
 	
 	public void setContent(String text){
@@ -53,6 +30,10 @@ public class SwipeData {
 	
 	public boolean isBadRead(){
 		return badRead;
+	}
+	
+	public List<Integer> getBadCharIndices(){
+		return this.badCharIndices;
 	}
 
 }
